@@ -6,9 +6,9 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Voice AI Pricing - Simplified", layout="wide")
 st.title("Voice AI Pricing - Simplified Comparison")
 
-# -----------------------------
+
 # Fixed provider assumptions
-# -----------------------------
+
 PROVIDERS = {
     # Pipecat
     "Pipecat (profile from calculator)": {
@@ -76,13 +76,27 @@ PROVIDERS = {
         "included_minutes": 0.0,
         "rate_per_min": 0.95,
     },
+
+    # ElevenLabs subscription + Telnyx telephony
+    "Elevenlabs (Subscription + Telnyx)": {
+        "type": "eleven_telnyx",
+        "fixed_monthly": 99.0,
+        "included_minutes": 250.0,
+        "rate_per_min": 0.12,
+        "telnyx": {
+            "activation_one_time": 1.0,
+            "monthly_number": 1.0,
+            "outbound_per_min": 0.00500,
+            "inbound_per_min": 0.00350,
+        },
+    },
 }
 
 NETO_ONBOARDING_ONE_TIME = 5000.0
 
-# -----------------------------
+
 # UI inputs (ONLY two)
-# -----------------------------
+
 c1, c2, c3 = st.columns([1, 1, 2])
 
 with c1:
@@ -98,18 +112,35 @@ with c3:
 # Neto onboarding is ONE-TIME: show it, don't amortize into monthly
 include_neto_onboarding = st.checkbox("Include Neto one-time onboarding ($5,000) in totals (shown separately)", value=False)
 
+# Telnyx activation is ONE-TIME
+include_telnyx_activation = st.checkbox("Include Telnyx one-time activation ($1) in totals (shown separately)", value=False)
+
 # Providers effective (no amortization applied)
 providers_effective = {name: dict(p) for name, p in PROVIDERS.items()}
 
-# -----------------------------
+
 # Pricing helpers
-# -----------------------------
+
 def livekit_inference_rate(p: dict) -> float:
     r = p["rates"]
     return float(r["llm"]) + float(r["stt"]) + float(r["tts"])
 
 def monthly_cost(minutes: float, p: dict) -> float:
     """Monthly recurring cost only (no one-time onboarding baked in)."""
+
+    if p.get("type") == "eleven_telnyx":
+        fixed = float(p["fixed_monthly"])
+        included = float(p.get("included_minutes", 0.0))
+        rate = float(p.get("rate_per_min", 0.0))
+        over = max(0.0, minutes - included)
+        eleven_usage = over * rate
+
+        tel = p["telnyx"]
+        telnyx_monthly_number = float(tel["monthly_number"])
+        telnyx_usage = minutes * float(tel["outbound_per_min"])  # conservative: assume outbound minutes
+
+        return fixed + eleven_usage + telnyx_monthly_number + telnyx_usage
+
     if p.get("type") != "livekit":
         included = float(p.get("included_minutes", 0.0))
         over = max(0.0, minutes - included)
@@ -135,16 +166,24 @@ def monthly_cost(minutes: float, p: dict) -> float:
     return fixed + agent_cost + telephony_cost + inf_net
 
 def total_cost_including_one_time(minutes: float, name: str, p: dict) -> float:
-    """Total used for ranking/plots if the user wants to include Neto onboarding as a one-time add-on."""
+    """Total used for ranking/plots if the user wants to include one-time fees."""
     base = monthly_cost(minutes, p)
+
     if include_neto_onboarding and name.startswith("Neto"):
-        return base + NETO_ONBOARDING_ONE_TIME
+        base += NETO_ONBOARDING_ONE_TIME
+
+    if include_telnyx_activation and p.get("type") == "eleven_telnyx":
+        base += float(p["telnyx"]["activation_one_time"])
+
     return base
 
 def display_rate(p: dict) -> float:
     if p.get("type") == "livekit":
         r = p["rates"]
         return float(r["agent"]) + float(r["telephony"]) + livekit_inference_rate(p)
+    if p.get("type") == "eleven_telnyx":
+        tel = p["telnyx"]
+        return float(p.get("rate_per_min", 0.0)) + float(tel["outbound_per_min"])
     return float(p.get("rate_per_min", 0.0))
 
 def display_included(p: dict) -> float:
@@ -152,105 +191,38 @@ def display_included(p: dict) -> float:
         return float(p.get("included_agent_minutes", 0.0))
     return float(p.get("included_minutes", 0.0))
 
-# -----------------------------
+
 # Scenario totals table (single table, explicit components)
-# -----------------------------
+
 M = float(total_minutes)
 
 rows = []
 for name, p in providers_effective.items():
     monthly = monthly_cost(M, p)
-    total = total_cost_including_one_time(M, name, p)    
+    total = total_cost_including_one_time(M, name, p)
+
+    one_time = 0.0
+    if include_neto_onboarding and name.startswith("Neto"):
+        one_time += NETO_ONBOARDING_ONE_TIME
+    if include_telnyx_activation and p.get("type") == "eleven_telnyx":
+        one_time += float(p["telnyx"]["activation_one_time"])
+
     rows.append({
         "Provider": name,
-        "One-time onboarding ($)": NETO_ONBOARDING_ONE_TIME if (include_neto_onboarding and name.startswith("Neto")) else 0.0,
+        "One-time fees ($)": one_time,
         "Fixed ($/mo)": float(p["fixed_monthly"]),
         "Included min (display)": display_included(p),
         "Effective $/min (display)": display_rate(p),
         "Total ($/mo)": total
     })
 
-
-
-# overdetailed table with explicit calculations (not used in final version, but kept here for reference and potential future use if we want to show explicit breakdowns in a table format instead of just the waterfall)
-# rows = []
-# for name, p in providers_effective.items():
-#     monthly = monthly_cost(M, p)
-#     total = total_cost_including_one_time(M, name, p)
-
-#     if p.get("type") != "livekit":
-#         fixed = float(p["fixed_monthly"])
-#         included = float(p.get("included_minutes", 0.0))
-#         rate = float(p.get("rate_per_min", 0.0))
-#         over = max(0.0, M - included)
-#         usage = over * rate
-#         one_time = NETO_ONBOARDING_ONE_TIME if (include_neto_onboarding and name.startswith("Neto")) else 0.0
-
-#         rows.append({
-#             "Provider": name,
-#             "Fixed ($/mo)": fixed,
-#             "Included min": included,
-#             "Overage min": over,
-#             "Rate ($/min)": rate,
-#             "Usage ($/mo)": usage,
-#             "Monthly recurring ($)": monthly,
-#             "One-time onboarding ($)": one_time,
-#             "Total incl one-time ($)": total,
-#         })
-#     else:
-#         r = p["rates"]
-#         fixed = float(p["fixed_monthly"])
-#         inc_agent = float(p["included_agent_minutes"])
-#         inc_tel = float(p["included_telephony_minutes"])
-#         credits = float(p["inference_credits"])
-
-#         agent_over = max(0.0, M - inc_agent)
-#         tel_over = max(0.0, M - inc_tel)
-
-#         agent_rate = float(r["agent"])
-#         tel_rate = float(r["telephony"])
-#         llm_rate = float(r["llm"])
-#         stt_rate = float(r["stt"])
-#         tts_rate = float(r["tts"])
-#         inf_rate = llm_rate + stt_rate + tts_rate
-
-#         agent_cost = agent_over * agent_rate
-#         tel_cost = tel_over * tel_rate
-
-#         inf_gross = M * inf_rate
-#         credit_used = min(credits, inf_gross)
-#         inf_net = max(0.0, inf_gross - credits)
-
-#         rows.append({
-#             "Provider": name,
-#             "Plan ($/mo)": fixed,
-#             "Included agent min": inc_agent,
-#             "Agent over min": agent_over,
-#             "Agent $/min": agent_rate,
-#             "Agent ($/mo)": agent_cost,
-#             "Included tel min": inc_tel,
-#             "Tel over min": tel_over,
-#             "Tel $/min": tel_rate,
-#             "Telephony ($/mo)": tel_cost,
-#             "LLM $/min": llm_rate,
-#             "STT $/min": stt_rate,
-#             "TTS $/min": tts_rate,
-#             "Inference $/min": inf_rate,
-#             "Inference gross ($/mo)": inf_gross,
-#             "Credits used ($/mo)": credit_used,
-#             "Inference net ($/mo)": inf_net,
-#             "Monthly recurring ($)": monthly,
-#             "One-time onboarding ($)": 0.0,
-#             "Total incl one-time ($)": total,
-#         })
-
 df_point = pd.DataFrame(rows)
 st.subheader("Totals at your scenario")
 st.dataframe(df_point, use_container_width=True)
 
-# -----------------------------
+
 # Consolidated curves plot (Plotly)
-# -----------------------------
+
 st.subheader("Total monthly cost curves (all providers)")
 
 max_minutes_default = max(1000.0, M * 2.0)
@@ -288,14 +260,14 @@ for name, p in providers_effective.items():
 fig.update_layout(
     height=450,
     xaxis_title="Minutes / month",
-    yaxis_title="Total cost ($)  (monthly + optional one-time for Neto)",
+    yaxis_title="Total cost ($)  (monthly + optional one-time fees)",
     legend=dict(font=dict(size=10))
 )
 st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------
+
 # Scenario comparison (stacked components)
-# -----------------------------
+
 st.markdown("### Scenario comparison (stacked components)")
 
 prov_names = list(providers_effective.keys())
@@ -309,12 +281,22 @@ for name in prov_names:
     monthly = monthly_cost(M, p)
     total = total_cost_including_one_time(M, name, p)
 
-    if p.get("type") != "livekit":
+    if p.get("type") == "eleven_telnyx":
+        fixed = float(p["fixed_monthly"]) + float(p["telnyx"]["monthly_number"])
+        included = float(p.get("included_minutes", 0.0))
+        rate = float(p.get("rate_per_min", 0.0))
+        over = max(0.0, M - included)
+        eleven_var = over * rate
+        telnyx_var = M * float(p["telnyx"]["outbound_per_min"])
+        var = eleven_var + telnyx_var
+
+    elif p.get("type") != "livekit":
         fixed = float(p["fixed_monthly"])
         included = float(p.get("included_minutes", 0.0))
         rate = float(p.get("rate_per_min", 0.0))
         over = max(0.0, M - included)
         var = over * rate
+
     else:
         r = p["rates"]
         fixed = float(p["fixed_monthly"])
@@ -331,7 +313,11 @@ for name in prov_names:
 
         var = agent_cost + tel_cost + inf_net
 
-    one_time = NETO_ONBOARDING_ONE_TIME if (include_neto_onboarding and name.startswith("Neto")) else 0.0
+    one_time = 0.0
+    if include_neto_onboarding and name.startswith("Neto"):
+        one_time += NETO_ONBOARDING_ONE_TIME
+    if include_telnyx_activation and p.get("type") == "eleven_telnyx":
+        one_time += float(p["telnyx"]["activation_one_time"])
 
     fixed_vals.append(fixed)
     var_vals.append(var)
@@ -342,8 +328,8 @@ bar = go.Figure()
 bar.add_trace(go.Bar(name="Fixed / Plan (monthly)", x=prov_names, y=fixed_vals, hovertemplate="$%{y:,.2f}<extra></extra>"))
 bar.add_trace(go.Bar(name="Usage / Variable (monthly)", x=prov_names, y=var_vals, hovertemplate="$%{y:,.2f}<extra></extra>"))
 
-if include_neto_onboarding:
-    bar.add_trace(go.Bar(name="Neto onboarding (one-time)", x=prov_names, y=one_time_vals, hovertemplate="$%{y:,.2f}<extra></extra>"))
+if include_neto_onboarding or include_telnyx_activation:
+    bar.add_trace(go.Bar(name="One-time fees", x=prov_names, y=one_time_vals, hovertemplate="$%{y:,.2f}<extra></extra>"))
 
 bar.update_layout(
     barmode="stack",
@@ -354,9 +340,9 @@ bar.update_layout(
 )
 st.plotly_chart(bar, use_container_width=True)
 
-# -----------------------------
+
 # Scenario breakdown (choose a provider) + Waterfall + Audit table
-# -----------------------------
+
 st.markdown("## Scenario breakdown (choose a provider)")
 
 provider_names = list(providers_effective.keys())
@@ -364,6 +350,38 @@ focus = st.selectbox("Provider", provider_names, index=0)
 p_focus = providers_effective[focus]
 
 def breakdown_items(minutes: float, name: str, p: dict):
+    if p.get("type") == "eleven_telnyx":
+        fixed = float(p["fixed_monthly"]) + float(p["telnyx"]["monthly_number"])
+        included = float(p.get("included_minutes", 0.0))
+        rate = float(p.get("rate_per_min", 0.0))
+        over = max(0.0, minutes - included)
+
+        eleven_usage_cost = over * rate
+        telnyx_usage_cost = minutes * float(p["telnyx"]["outbound_per_min"])  # assume outbound
+
+        one_time = float(p["telnyx"]["activation_one_time"]) if include_telnyx_activation else 0.0
+
+        items = [
+            ("Fixed / Plan fee (Eleven + Telnyx number)", fixed),
+            ("Eleven usage (overage × rate)", eleven_usage_cost),
+            ("Telnyx usage (minutes × outbound rate)", telnyx_usage_cost),
+        ]
+        if one_time > 0:
+            items.append(("Telnyx activation (one-time)", one_time))
+
+        meta = {
+            "minutes": minutes,
+            "fixed": fixed,
+            "included": included,
+            "rate": rate,
+            "over": over,
+            "eleven_usage_cost": eleven_usage_cost,
+            "telnyx_usage_cost": telnyx_usage_cost,
+            "one_time": one_time,
+            "total": fixed + eleven_usage_cost + telnyx_usage_cost + one_time,
+        }
+        return items, meta
+
     if p.get("type") != "livekit":
         fixed = float(p["fixed_monthly"])
         included = float(p.get("included_minutes", 0.0))
@@ -371,7 +389,6 @@ def breakdown_items(minutes: float, name: str, p: dict):
         over = max(0.0, minutes - included)
         usage_cost = over * rate
 
-        # Optional one-time for Neto (shown as separate waterfall bar if enabled)
         one_time = NETO_ONBOARDING_ONE_TIME if (include_neto_onboarding and name.startswith("Neto")) else 0.0
 
         items = [("Fixed / Plan fee", fixed), ("Usage (minutes × rate)", usage_cost)]
@@ -463,18 +480,85 @@ wf.update_layout(
 )
 st.plotly_chart(wf, use_container_width=True)
 
-# Quick summary numbers
 c1, c2, c3 = st.columns(3)
 c1.metric("Minutes / month", f"{M:,.0f}")
 c2.metric("Total (incl optional one-time)", f"${meta['total']:,.2f}")
 c3.metric("Effective $/min (model)", f"${(meta['total']/M if M > 0 else 0.0):.4f}")
 
-# Audit table (textual + explicit substitutions)
 with st.expander("Show calculation details (audit)"):
     st.markdown("### Inputs used")
     st.write(f"- Minutes/month (M): **{M:,.0f}**")
 
-    if p_focus.get("type") != "livekit":
+    if p_focus.get("type") == "eleven_telnyx":
+        fixed = meta["fixed"]
+        included = meta["included"]
+        rate = meta["rate"]
+        over = meta["over"]
+        eleven_usage_cost = meta["eleven_usage_cost"]
+        telnyx_usage_cost = meta["telnyx_usage_cost"]
+        one_time = meta["one_time"]
+        total = meta["total"]
+
+        tel = p_focus["telnyx"]
+        st.markdown("### Parameters")
+        st.write(f"- Eleven subscription: **$99.00/mo**")
+        st.write(f"- Included minutes: **{included:,.0f}**")
+        st.write(f"- Eleven overage rate: **${rate:,.5f}/min**")
+        st.write(f"- Telnyx monthly number: **${float(tel['monthly_number']):,.2f}/mo**")
+        st.write(f"- Telnyx outbound rate: **${float(tel['outbound_per_min']):,.5f}/min**")
+        st.write(f"- Telnyx inbound rate: **${float(tel['inbound_per_min']):,.5f}/min** (not used; assuming outbound)")
+
+        calc = pd.DataFrame([
+            {
+                "Component": "Eleven overage minutes",
+                "Formula": "max(0, M − included)",
+                "Substitution": f"max(0, {M:,.0f} − {included:,.0f})",
+                "Result": f"{over:,.0f} min",
+                "Value ($)": f"{eleven_usage_cost:,.2f}",
+            },
+            {
+                "Component": "Eleven usage cost",
+                "Formula": "overage × rate",
+                "Substitution": f"{over:,.0f} × ${rate:,.5f}",
+                "Result": f"${eleven_usage_cost:,.2f}",
+                "Value ($)": f"{eleven_usage_cost:,.2f}",
+            },
+            {
+                "Component": "Telnyx usage cost",
+                "Formula": "M × outbound_rate",
+                "Substitution": f"{M:,.0f} × ${float(tel['outbound_per_min']):,.5f}",
+                "Result": f"${telnyx_usage_cost:,.2f}",
+                "Value ($)": f"{telnyx_usage_cost:,.2f}",
+            },
+            {
+                "Component": "Fixed (Eleven + Telnyx number)",
+                "Formula": "99 + monthly_number",
+                "Substitution": f"$99.00 + ${float(tel['monthly_number']):,.2f}",
+                "Result": f"${fixed:,.2f}",
+                "Value ($)": f"{fixed:,.2f}",
+            },
+        ])
+
+        if one_time > 0:
+            calc = pd.concat([calc, pd.DataFrame([{
+                "Component": "Telnyx activation (one-time)",
+                "Formula": "add activation fee",
+                "Substitution": f"+ ${float(tel['activation_one_time']):,.2f}",
+                "Result": f"${one_time:,.2f}",
+                "Value ($)": f"{one_time:,.2f}",
+            }])], ignore_index=True)
+
+        calc = pd.concat([calc, pd.DataFrame([{
+            "Component": "Total",
+            "Formula": "fixed + eleven_usage + telnyx_usage + one_time",
+            "Substitution": f"${fixed:,.2f} + ${eleven_usage_cost:,.2f} + ${telnyx_usage_cost:,.2f} + ${one_time:,.2f}",
+            "Result": f"${total:,.2f}",
+            "Value ($)": f"{total:,.2f}",
+        }])], ignore_index=True)
+
+        st.dataframe(calc, use_container_width=True)
+
+    elif p_focus.get("type") != "livekit":
         fixed = meta["fixed"]
         included = meta["included"]
         rate = meta["rate"]
@@ -532,7 +616,6 @@ with st.expander("Show calculation details (audit)"):
         st.dataframe(calc, use_container_width=True)
 
     else:
-        # LiveKit audit
         inc_agent = meta["inc_agent"]
         inc_tel = meta["inc_tel"]
         agent_rate = meta["agent_rate"]
@@ -623,4 +706,3 @@ with st.expander("Show calculation details (audit)"):
             },
         ])
         st.dataframe(calc, use_container_width=True)
-
